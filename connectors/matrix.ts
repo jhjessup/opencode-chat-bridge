@@ -593,6 +593,8 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
       let attempt = await runAttempt(session)
       let cleanResponse = sanitizeServerPaths(removeDocMarkers(removeImageMarkers(attempt.responseBuffer)))
       let diagnostic = diagnoseEmptyResponse(attempt.acpResponse, attempt.responseBuffer, cleanResponse)
+      let attemptHasAttachment =
+        this.hasAttachmentMarker(attempt.responseBuffer) || this.hasAttachmentMarker(attempt.toolResultsBuffer)
 
       if (diagnostic?.source === "bridge-capture-lost") {
         this.log(
@@ -614,7 +616,7 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
           `images=${attempt.imageCount} [${context.sessionId}]`,
         )
 
-        if (!attempt.hadToolActivity && attempt.imageCount === 0) {
+        if (!attempt.hadToolActivity && attempt.imageCount === 0 && !attemptHasAttachment) {
           this.log(`[ACP] Retrying once with a fresh client/session [${context.sessionId}]`)
           const retrySession = await this.recreateACPSession(
             context.sessionId,
@@ -628,6 +630,8 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
           attempt = await runAttempt(session)
           cleanResponse = sanitizeServerPaths(removeDocMarkers(removeImageMarkers(attempt.responseBuffer)))
           diagnostic = diagnoseEmptyResponse(attempt.acpResponse, attempt.responseBuffer, cleanResponse)
+          attemptHasAttachment =
+            this.hasAttachmentMarker(attempt.responseBuffer) || this.hasAttachmentMarker(attempt.toolResultsBuffer)
 
           if (diagnostic?.source === "bridge-capture-lost") {
             this.log(
@@ -652,7 +656,7 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
         }
       }
 
-      if (diagnostic) {
+      if (diagnostic && !attemptHasAttachment) {
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
         this.log(
           `[FAIL] ${elapsed}s empty ACP response source=${diagnostic.source} ` +
@@ -705,7 +709,9 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
       }
 
       session.outputChars += cleanResponse.length
-      await this.sendReply(context, cleanResponse)
+      if (cleanResponse.trim().length > 0) {
+        await this.sendReply(context, cleanResponse)
+      }
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
       const tools = attempt.toolCallCount > 0
@@ -769,6 +775,19 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
       this.logError(`Failed to send image to ${context.roomId}:`, err)
       await this.sendReply(context, `[Image: ${image.alt || "Unable to display"}]`)
     }
+  }
+
+  /**
+   * True if the text contains an [DOCLIBRARY_IMAGE]/[DOCLIBRARY_DOC] marker
+   * pointing at a file that actually exists. Used to treat marker-only
+   * replies (no surrounding prose) as a successful attempt rather than an
+   * empty response needing a retry.
+   */
+  private hasAttachmentMarker(text: string): boolean {
+    return (
+      extractImagePaths(text).some((p) => fs.existsSync(p)) ||
+      extractDocPaths(text).some((p) => fs.existsSync(p))
+    )
   }
 
   private async sendImageFromFile(context: MatrixEventContext, filePath: string): Promise<void> {
