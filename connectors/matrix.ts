@@ -49,6 +49,8 @@ import {
   shouldShowToolOutput,
   extractImagePaths,
   removeImageMarkers,
+  extractDocPaths,
+  removeDocMarkers,
   sanitizeServerPaths,
 } from "../src"
 
@@ -589,7 +591,7 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
       session.lastEventIds.set(context.replyThreadRootId, context.eventId)
 
       let attempt = await runAttempt(session)
-      let cleanResponse = sanitizeServerPaths(removeImageMarkers(attempt.responseBuffer))
+      let cleanResponse = sanitizeServerPaths(removeDocMarkers(removeImageMarkers(attempt.responseBuffer)))
       let diagnostic = diagnoseEmptyResponse(attempt.acpResponse, attempt.responseBuffer, cleanResponse)
 
       if (diagnostic?.source === "bridge-capture-lost") {
@@ -599,7 +601,7 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
           `cleanChars=${diagnostic.cleanChars} chunks=${attempt.chunkCount} [${context.sessionId}]`,
         )
         attempt.responseBuffer = attempt.acpResponse
-        cleanResponse = sanitizeServerPaths(removeImageMarkers(attempt.responseBuffer))
+        cleanResponse = sanitizeServerPaths(removeDocMarkers(removeImageMarkers(attempt.responseBuffer)))
         diagnostic = diagnoseEmptyResponse(attempt.acpResponse, attempt.responseBuffer, cleanResponse)
       }
 
@@ -624,7 +626,7 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
           session.inputChars += query.length
           session.lastEventIds.set(context.replyThreadRootId, context.eventId)
           attempt = await runAttempt(session)
-          cleanResponse = sanitizeServerPaths(removeImageMarkers(attempt.responseBuffer))
+          cleanResponse = sanitizeServerPaths(removeDocMarkers(removeImageMarkers(attempt.responseBuffer)))
           diagnostic = diagnoseEmptyResponse(attempt.acpResponse, attempt.responseBuffer, cleanResponse)
 
           if (diagnostic?.source === "bridge-capture-lost") {
@@ -634,7 +636,7 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
               `cleanChars=${diagnostic.cleanChars} chunks=${attempt.chunkCount} [${context.sessionId}]`,
             )
             attempt.responseBuffer = attempt.acpResponse
-            cleanResponse = sanitizeServerPaths(removeImageMarkers(attempt.responseBuffer))
+            cleanResponse = sanitizeServerPaths(removeDocMarkers(removeImageMarkers(attempt.responseBuffer)))
             diagnostic = diagnoseEmptyResponse(attempt.acpResponse, attempt.responseBuffer, cleanResponse)
           }
 
@@ -680,6 +682,25 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
         if (fs.existsSync(imagePath)) {
           this.log(`Uploading image from response: ${imagePath}`)
           await this.sendImageFromFile(context, imagePath)
+        }
+      }
+
+      const uploadedDocPaths = new Set<string>()
+      const toolDocPaths = extractDocPaths(attempt.toolResultsBuffer)
+      for (const docPath of toolDocPaths) {
+        if (fs.existsSync(docPath)) {
+          this.log(`Uploading file from tool result: ${docPath}`)
+          await this.sendFileFromFile(context, docPath)
+          uploadedDocPaths.add(docPath)
+        }
+      }
+
+      const responseDocPaths = extractDocPaths(attempt.responseBuffer)
+      for (const docPath of responseDocPaths) {
+        if (uploadedDocPaths.has(docPath)) continue
+        if (fs.existsSync(docPath)) {
+          this.log(`Uploading file from response: ${docPath}`)
+          await this.sendFileFromFile(context, docPath)
         }
       }
 
@@ -787,6 +808,71 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
       this.logError(`Failed to send image from file to ${context.roomId}:`, err)
     }
   }
+
+  private async sendFileFromFile(context: MatrixEventContext, filePath: string): Promise<void> {
+    try {
+      if (!fs.existsSync(filePath)) {
+        this.logError(`File not found: ${filePath}`)
+        return
+      }
+
+      const buffer = fs.readFileSync(filePath)
+      const fileName = path.basename(filePath)
+      const mimetype = guessMimeType(fileName)
+      const mxcUrl = await this.matrix!.uploadContent(buffer, mimetype, fileName)
+
+      const content: any = {
+        msgtype: "m.file",
+        body: fileName,
+        filename: fileName,
+        url: mxcUrl,
+        info: { mimetype, size: buffer.length },
+      }
+
+      if (this.threadIsolation) {
+        const session = this.sessionManager.get(context.sessionId)
+        const lastEventId = session?.lastEventIds.get(context.replyThreadRootId) || context.replyThreadRootId
+        content["m.relates_to"] = buildThreadRelation(context.replyThreadRootId, lastEventId)
+      }
+
+      const eventId = await this.matrix!.sendMessage(context.roomId, content)
+      if (this.threadIsolation) {
+        const session = this.sessionManager.get(context.sessionId)
+        if (session && eventId) {
+          session.lastEventIds.set(context.replyThreadRootId, eventId)
+        }
+      }
+
+      this.log(`Sent file from ${filePath} to ${context.roomId}: ${mxcUrl}`)
+    } catch (err) {
+      this.logError(`Failed to send file to ${context.roomId}:`, err)
+    }
+  }
+}
+
+const MIME_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  epub: "application/epub+zip",
+  zip: "application/zip",
+  txt: "text/plain",
+  md: "text/markdown",
+  csv: "text/csv",
+  json: "application/json",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+  tar: "application/x-tar",
+  gz: "application/gzip",
+}
+
+function guessMimeType(fileName: string): string {
+  const ext = fileName.split(".").pop()?.toLowerCase() || ""
+  return MIME_TYPES[ext] || "application/octet-stream"
 }
 
 // =============================================================================
