@@ -98,6 +98,7 @@ import {
   shouldHandleThreadReply,
 } from "./matrix-thread-helpers"
 import { diagnoseEmptyResponse } from "../src/acp-response-diagnostics"
+import { ensureCrossSigningBootstrapped } from "./matrix-cross-signing"
 
 // =============================================================================
 // Session Type
@@ -173,6 +174,17 @@ export class MatrixConnector extends BaseConnector<RoomSession> {
 
     this.matrix.on("room.message", this.handleRoomMessage.bind(this))
     await this.matrix.start()
+
+    const whoami = await this.matrix.getWhoAmI()
+    await ensureCrossSigningBootstrapped({
+      matrix: this.matrix,
+      userId: USER_ID!,
+      password: PASSWORD,
+      deviceId: whoami.device_id!,
+      storagePath: STORAGE_PATH,
+      log: this.log.bind(this),
+      logError: this.logError.bind(this),
+    })
 
     this.startSessionExpiryLoop()
     this.log("Started! Listening for messages...")
